@@ -7,6 +7,7 @@ import atexit
 _PAUSED = False
 
 def _pause(msg="\nPress Enter to exit..."):
+    """Keep the console open at ANY outcome so the user can read the logs."""
     global _PAUSED
     if _PAUSED:
         return
@@ -19,10 +20,11 @@ def _pause(msg="\nPress Enter to exit..."):
     try:
         input(msg)
     except (EOFError, KeyboardInterrupt):
-        pass
+        pass  # stdin closed / second Ctrl+C -> just exit
     except Exception:
         pass
 
+# pause on success, on err()/exit(), on uncaught exception and on Ctrl+C
 if "--no-pause" not in sys.argv:
     atexit.register(_pause)
 
@@ -199,6 +201,7 @@ def force_copy(src: Path, dst: Path) -> bool:
     except OSError:
         pass  # copyfile will attempt the overwrite anyway
 
+    last = None
     for _ in range(3):
         try:
             shutil.copyfile(src, dst)
@@ -207,12 +210,9 @@ def force_copy(src: Path, dst: Path) -> bool:
         except OSError as e:
             last = e
             time.sleep(0.3)
-    else:
-        try:
-            warn(f"Copy failed '{src!s}' -> '{dst!s}': {last}")
-        except UnboundLocalError:
-            warn(f"Copy failed '{src!s}' -> '{dst!s}'")
-        return False
+
+    warn(f"Copy failed '{src!s}' -> '{dst!s}'" + (f": {last}" if last else ""))
+    return False
 
 @contextmanager
 def progress_log(msg: str):
@@ -243,13 +243,21 @@ if cur_package["name"] != "Mega Hack v9":
 
 def find_bundle(bundles: list[dict]):
     global MH_VERSION, USE_GEODE
+
+    def matches(bundle: dict) -> bool:
+        return bool(bundle.get("geode")) == USE_GEODE
+
     if MH_VERSION == 'latest':
-        return bundles[0]
+        # pick the first bundle of the RIGHT KIND, not just bundles[0]
+        for bundle in bundles:
+            if matches(bundle):
+                return bundle
+        err(f"No {'GEODE' if USE_GEODE else 'STANDALONE'} bundle found in the package")
 
     found_other = False
     for bundle in bundles:
         if bundle["name"] == MH_VERSION:
-            if bundle["geode"] != USE_GEODE:
+            if not matches(bundle):
                 found_other = True
             else:
                 return bundle
@@ -266,6 +274,8 @@ cur_bundle = find_bundle(cur_package["bundles"])
 if not cur_bundle:
     err(f"Unable to find bundle information for '{MH_VERSION}' ({'GEODE' if USE_GEODE else 'NON-GEODE'})")
 
+print(f"Selected bundle: {cur_bundle['name']} ({'GEODE' if cur_bundle['geode'] else 'STANDALONE'})")
+
 # resolve 'latest' to a real version so string comparisons in patch_dll work
 if MH_VERSION == 'latest':
     MH_VERSION = cur_bundle["name"]
@@ -275,7 +285,7 @@ filename = cur_bundle["file"]
 
 MEGAHACK_URL = "https://absolllute.com/api/mega_hack/v9/files/{}/{}".format(group, filename)
 
-with progress_log(f"Downloading {cur_bundle['name']}"):
+with progress_log(f"Downloading {cur_bundle['name']} ({'geode' if cur_bundle['geode'] else 'standalone'})"):
     try:
         with urlopen(Request(MEGAHACK_URL, headers={"User-Agent": USER_AGENT})) as r:
             megahack_zip = r.read()
@@ -336,6 +346,114 @@ def patch_dll(data: bytes):
 
     return data
 
+# ---------------------------------------------------------------------------
+# Version helpers — force mod.json requirements down to what's installed
+# ---------------------------------------------------------------------------
+def _ver_tuple(v) -> tuple[int, int, int]:
+    parts = [int(x) for x in re.findall(r"\d+", str(v))][:3]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+def _file_version(path: Path) -> str | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class VS_FIXEDFILEINFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSignature", wintypes.DWORD), ("dwStrucVersion", wintypes.DWORD),
+                ("dwFileVersionMS", wintypes.DWORD), ("dwFileVersionLS", wintypes.DWORD),
+                ("dwProductVersionMS", wintypes.DWORD), ("dwProductVersionLS", wintypes.DWORD),
+                ("dwFileFlagsMask", wintypes.DWORD), ("dwFileFlags", wintypes.DWORD),
+                ("dwFileOS", wintypes.DWORD), ("dwFileType", wintypes.DWORD),
+                ("dwFileSubtype", wintypes.DWORD), ("dwFileDateMS", wintypes.DWORD),
+                ("dwFileDateLS", wintypes.DWORD),
+            ]
+
+        size = ctypes.windll.version.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ctypes.windll.version.GetFileVersionInfoW(str(path), 0, size, buf):
+            return None
+        ptr = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not ctypes.windll.version.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(length)):
+            return None
+        info = ctypes.cast(ptr, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
+        return f"{info.dwFileVersionMS >> 16}.{info.dwFileVersionMS & 0xFFFF}.{info.dwFileVersionLS >> 16}"
+    except Exception:
+        return None
+
+def _detect_version(version_files: list[Path], dll_patterns: list[str], dll_dirs: list[Path]) -> str | None:
+    for p in version_files:
+        try:
+            if p.is_file():
+                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if re.fullmatch(r"\d+(\.\d+){0,2}", line):
+                        return line
+        except OSError:
+            pass
+    for d in dll_dirs:
+        for pattern in dll_patterns:
+            for p in sorted(d.glob(pattern)):
+                v = _file_version(p)
+                if v:
+                    return v
+    return None
+
+def get_installed_geode_version() -> str | None:
+    geode_dir = GD_PATH / "geode"
+    return _detect_version(
+        [geode_dir / "version", GD_PATH / "geode-version"],
+        ["*eode*.dll"],
+        [GD_PATH, geode_dir],
+    )
+
+def get_installed_gd_version() -> str | None:
+    return _file_version(GD_PATH / "GeometryDash.exe")
+
+def relax_requirements(mod: dict, installed_geode: str | None, installed_gd: str | None) -> list[str]:
+    """Force every loader/game version requirement down to what is installed."""
+    changes = []
+    target_geode = installed_geode or "0.0.0"
+
+    # top-level loader requirement — set unconditionally, never compare-and-skip
+    old = mod.get("geode")
+    if str(old) != target_geode:
+        changes.append(f"geode {old if old is not None else '(none)'} -> {target_geode}")
+    mod["geode"] = target_geode
+
+    # game version requirement
+    if installed_gd:
+        gd_req = mod.get("gd")
+        if isinstance(gd_req, dict):
+            for key, val in list(gd_req.items()):
+                if _ver_tuple(val) > _ver_tuple(installed_gd):
+                    changes.append(f"gd[{key}] {val} -> {installed_gd}")
+                    gd_req[key] = installed_gd
+            mod["gd"] = gd_req
+        elif isinstance(gd_req, str) and _ver_tuple(gd_req) > _ver_tuple(installed_gd):
+            changes.append(f"gd {gd_req} -> {installed_gd}")
+            mod["gd"] = installed_gd
+
+    # explicit dependencies on the loader itself (old map form and new list form)
+    deps = mod.get("dependencies")
+    if isinstance(deps, dict):
+        for key in list(deps):
+            if str(key).lower() in {"geode", "geode.loader"}:
+                if _ver_tuple(deps[key]) > _ver_tuple(target_geode):
+                    changes.append(f"dependencies[{key}] {deps[key]} -> {target_geode}")
+                    deps[key] = target_geode
+    elif isinstance(deps, list):
+        for dep in deps:
+            if isinstance(dep, dict) and str(dep.get("id", "")).lower() in {"geode", "geode.loader"}:
+                if _ver_tuple(dep.get("version", "0")) > _ver_tuple(target_geode):
+                    changes.append(f"dependency {dep.get('id')} {dep.get('version')} -> {target_geode}")
+                    dep["version"] = target_geode
+
+    return changes
+
 def handle_standalone():
     # Extract the zip
     with progress_log("Extracting zip file and patching"):
@@ -368,6 +486,13 @@ def handle_geode():
     OUT_FILENAME = "absolllute.hackmega.geode"
     out_path = CWD / OUT_FILENAME  # stable location next to the .exe
 
+    installed_geode = get_installed_geode_version()
+    installed_gd = get_installed_gd_version()
+    print(f"Installed Geode version: {installed_geode or 'not detected'}")
+    print(f"Installed game version:  {installed_gd or 'not detected'}")
+
+    saw_mod_json = False
+
     with progress_log("Extracting geode file and patching"):
         with zipfile.ZipFile(io.BytesIO(megahack_zip), 'r') as zip_in, \
             zipfile.ZipFile(out_path, 'w') as zip_out:
@@ -377,25 +502,83 @@ def handle_geode():
                 filename = item.filename
                 data = zip_in.read(filename)
 
-                match filename:
-                    case "absolllute.megahack.dll":
-                        data = patch_dll(data)
+                base = filename.lower().replace("\\", "/").rsplit("/", 1)[-1]
 
-                        # need to update the filename too
-                        item.filename = OUT_FILENAME.replace(".geode", ".dll")
-                    case "mod.json":
-                        # we need to modify the id to match the output filename, all the other changes are cosmetic
-                        mod = json.loads(data)
-                        mod["id"] = "absolllute.hackmega"
-                        mod["name"] = "HackMega"
-                        mod["description"] = "Totally new software..."
-                        data = json.dumps(mod, indent="\t").encode()
+                if base == "absolllute.megahack.dll":
+                    data = patch_dll(data)
+
+                    # need to update the filename too
+                    item.filename = OUT_FILENAME.replace(".geode", ".dll")
+                elif base == "mod.json":
+                    saw_mod_json = True
+
+                    # we need to modify the id to match the output filename, all the other changes are cosmetic
+                    mod = json.loads(data.decode("utf-8-sig"))
+                    mod["id"] = "absolllute.hackmega"
+                    mod["name"] = "HackMega"
+                    mod["description"] = "Totally new software..."
+                    mod.setdefault("developer", "absolllute")
+                    mod.setdefault("version", "1.0.0")
+
+                    for change in relax_requirements(mod, installed_geode, installed_gd):
+                        warn(f"Relaxed requirement: {change}")
+
+                    data = json.dumps(mod, indent="\t", ensure_ascii=False).encode()
 
                 zip_out.writestr(item, data)
 
-    # Force-transfer it over to the geode folder now (create folder, replace existing)
+            if not saw_mod_json:
+                warn("mod.json was not found in the package — injecting a minimal one")
+                mod = {
+                    "id": "absolllute.hackmega",
+                    "name": "HackMega",
+                    "developer": "absolllute",
+                    "description": "Totally new software...",
+                    "version": "1.0.0",
+                    "geode": installed_geode or "0.0.0",
+                    "gd": {"win": installed_gd} if installed_gd else {"win": "2.2.0"},
+                }
+                zip_out.writestr("mod.json", json.dumps(mod, indent="\t"))
+
+    # Verify what actually ended up inside the .geode
+    try:
+        with zipfile.ZipFile(out_path) as zf:
+            names = {n.lower().replace("\\", "/").rsplit("/", 1)[-1]: n for n in zf.namelist()}
+            if "mod.json" not in names:
+                warn("mod.json is missing from the produced .geode!")
+            else:
+                check = json.loads(zf.read(names["mod.json"]).decode("utf-8-sig"))
+                print(f"Written requirement -> geode: {check.get('geode')!r}, gd: {check.get('gd')!r}, deps: {check.get('dependencies')!r}")
+                if installed_geode and _ver_tuple(check.get("geode", "0")) > _ver_tuple(installed_geode):
+                    warn(f"Requirement is STILL higher than the installed loader ({check.get('geode')} > {installed_geode})")
+    except Exception as e:
+        warn(f"Could not verify the produced .geode: {e}")
+
+    # Force-transfer it over to the geode folder now (purge stale copies and cache, then replace)
     GEODE_DIR = GD_PATH / "geode" / "mods"
     copied_geode = False
+
+    with progress_log("Removing stale copies and Geode cache"):
+        try:
+            GEODE_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        for stale in list(GEODE_DIR.glob("absolllute.*")):
+            try:
+                os.chmod(stale, 0o666)
+            except OSError:
+                pass
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        for stale in (GEODE_DIR / ".index", GD_PATH / "geode" / "mods" / ".index"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        shutil.rmtree(GD_PATH / "geode" / "config" / "absolllute.hackmega", ignore_errors=True)
+
     with progress_log("Copying geode to mods folder (overwrite)"):
         copied_geode = force_copy(out_path, GEODE_DIR / OUT_FILENAME)
 
