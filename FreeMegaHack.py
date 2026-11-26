@@ -1,6 +1,4 @@
-r"""-- MegaHack Crack by BlackCAT404 --
-GitHub repo: https://github.com/BlackCAT404-RT/FreeMegaHack/
-"""
+r"""-- MegaHack Crack by BlackCAT404 --"""
 
 import platform
 import sys
