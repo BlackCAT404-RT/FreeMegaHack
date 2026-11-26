@@ -1,4 +1,4 @@
 # FreeMegaHack
 1. Download [Geode](https://github.com/geode-sdk/geode/releases/) `(Need geode-installer-vX.X.X-win.exe)`. During installation, select the folder where the game is located.
-2. Download `FreeMegaHack.exe (for Windows)` or [FreeMegaHack.py](https://github.com/BlackCAT404-RT/FreeMegaHack/blob/main/FreeMegaHack.py).
+2. Download [FreeMegaHack.exe (for Windows)](https://github.com/BlackCAT404-RT/FreeMegaHack/releases/FreeMegaHack.exe) or [FreeMegaHack.py](https://github.com/BlackCAT404-RT/FreeMegaHack/blob/main/FreeMegaHack.py).
 3. Install crack.
