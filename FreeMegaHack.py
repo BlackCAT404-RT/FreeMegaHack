@@ -1,9 +1,32 @@
-r"""
--- MegaHack Crack Script --
-
+r"""-- MegaHack Crack by BlackCAT404 --
+GitHub repo: https://github.com/BlackCAT404-RT/FreeMegaHack/
 """
 
 import platform
+import sys
+import atexit
+
+_PAUSED = False
+
+def _pause(msg="\nPress Enter to exit..."):
+    global _PAUSED
+    if _PAUSED:
+        return
+    _PAUSED = True
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        input(msg)
+    except (EOFError, KeyboardInterrupt):
+        pass
+    except Exception:
+        pass
+
+if "--no-pause" not in sys.argv:
+    atexit.register(_pause)
 
 err = lambda msg: print(f"[ERROR] {msg}") or exit(1)
 warn = lambda msg: print(f"[WARNING] {msg}")
@@ -17,6 +40,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--mh-version', default='latest', help='Specify version (default: latest)')
 parser.add_argument('--standalone', action='store_true', help='Set if selected version should be a standalone version')
+parser.add_argument('--no-pause', action='store_true', help='Do not wait for Enter at the end')
 
 args = parser.parse_args()
 MH_VERSION = args.mh_version
@@ -42,19 +66,19 @@ def get_steam_path():
 def get_steam_libraries(steam_path: Path):
     libraries = [steam_path]
     vdf_path = steam_path / "steamapps" / "libraryfolders.vdf"
-    
+
     if vdf_path.exists():
         content = vdf_path.read_text(encoding='utf-8')
         # Find all "path" entries
         paths = re.findall(r'"path"\s+"([^"]+)"', content)
         libraries.extend(map(Path, paths))
-    
+
     return libraries
 
 def find_game(app_id) -> Path | None:
     steam_path = get_steam_path()
     print(f"Got a steam installation path of '{steam_path}'")
-    
+
     for library in get_steam_libraries(steam_path):
         manifest = library / "steamapps" / f"appmanifest_{app_id}.acf"
         if manifest.exists():
@@ -113,11 +137,84 @@ import time
 import base64
 import functools
 import shutil
+import tempfile
 
-# convenience
-CWD = Path(__file__).parent
+# ---------------------------------------------------------------------------
+# STABLE WORKING DIRECTORY
+# Under PyInstaller, __file__ lives in the temporary _MEIPASS folder that is
+# deleted on exit. Use the .exe's own folder instead, with a writable fallback.
+# ---------------------------------------------------------------------------
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        candidate = Path(sys.executable).resolve().parent
+    else:
+        candidate = Path(__file__).resolve().parent
+
+    try:
+        probe = candidate / ".mh_write_test"
+        probe.write_bytes(b"x")
+        probe.unlink()
+        return candidate
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "megahack_crack"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+CWD = get_base_dir()
 os.chdir(str(CWD))
+print(f"Working directory: '{CWD!s}'")
 print = functools.partial(print, flush=True)
+
+def get_terminal_width():
+    try:
+        size = shutil.get_terminal_size()
+        return size.columns - 1
+    except OSError:
+        # Fallback if the terminal size cannot be determined
+        return 80
+
+# ---------------------------------------------------------------------------
+# FORCED COPY WITH REPLACEMENT
+# Overwrites the destination, clears read-only, retries a few times.
+# Returns True only if the destination exists with the expected size.
+# ---------------------------------------------------------------------------
+def force_copy(src: Path, dst: Path) -> bool:
+    src = Path(src)
+    dst = Path(dst)
+    if not src.exists():
+        warn(f"Source file missing, cannot copy: '{src!s}'")
+        return False
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        warn(f"Cannot create folder '{dst.parent!s}': {e}")
+        return False
+
+    try:
+        if dst.exists():
+            try:
+                os.chmod(dst, 0o666)
+            except OSError:
+                pass
+            dst.unlink()
+    except OSError:
+        pass  # copyfile will attempt the overwrite anyway
+
+    for _ in range(3):
+        try:
+            shutil.copyfile(src, dst)
+            if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                return True
+        except OSError as e:
+            last = e
+            time.sleep(0.3)
+    else:
+        try:
+            warn(f"Copy failed '{src!s}' -> '{dst!s}': {last}")
+        except UnboundLocalError:
+            warn(f"Copy failed '{src!s}' -> '{dst!s}'")
+        return False
 
 @contextmanager
 def progress_log(msg: str):
@@ -171,6 +268,10 @@ cur_bundle = find_bundle(cur_package["bundles"])
 if not cur_bundle:
     err(f"Unable to find bundle information for '{MH_VERSION}' ({'GEODE' if USE_GEODE else 'NON-GEODE'})")
 
+# resolve 'latest' to a real version so string comparisons in patch_dll work
+if MH_VERSION == 'latest':
+    MH_VERSION = cur_bundle["name"]
+
 group = cur_bundle["group"]
 filename = cur_bundle["file"]
 
@@ -223,9 +324,9 @@ def patch_dll(data: bytes):
         if min_version and MH_VERSION < min_version:
             # No need to apply
             return True
-        
+
         return data != (data := pattern.sub(lambda m: patch + m.group(0)[len(patch):], data, 1))
-    
+
     if not apply_patch(ID_CHECK_PAT, PATCH_DATA1):
         err("Failed to find pattern for the id check!")
     if not apply_patch(JSON_SIGNATURE_CHECK_PAT, PATCH_DATA1):
@@ -234,7 +335,7 @@ def patch_dll(data: bytes):
         err("Failed to find pattern for the key bypass!")
     if not apply_patch(BYPASS_VERIFY_PAT, PATCH_DATA3, "v9.1"):
         err("Failed to find pattern for the verification bypass!")
-    
+
     return data
 
 def handle_standalone():
@@ -249,13 +350,13 @@ def handle_standalone():
                 if filename.endswith("/"):
                     (GD_PATH / filename.rstrip("/")).mkdir(parents=True, exist_ok=True)
                 else:
-                    data = zf.read(filename)            
+                    data = zf.read(filename)
                     match filename:
                         case "hackpro.dll":
                             data = patch_dll(data)
 
                     (GD_PATH / item.filename).write_bytes(data)
-    
+
     BORDER = '#' * get_terminal_width()
     return dedent(f"""
         {BORDER}
@@ -266,16 +367,18 @@ def handle_standalone():
     """)
 
 def handle_geode():
+    OUT_FILENAME = "absolllute.hackmega.geode"
+    out_path = CWD / OUT_FILENAME  # stable location next to the .exe
+
     with progress_log("Extracting geode file and patching"):
-        OUT_FILENAME = "absolllute.hackmega.geode"
         with zipfile.ZipFile(io.BytesIO(megahack_zip), 'r') as zip_in, \
-            zipfile.ZipFile(OUT_FILENAME, 'w') as zip_out:
-            
+            zipfile.ZipFile(out_path, 'w') as zip_out:
+
             # Patching shit
             for item in zip_in.infolist():
                 filename = item.filename
                 data = zip_in.read(filename)
-                
+
                 match filename:
                     case "absolllute.megahack.dll":
                         data = patch_dll(data)
@@ -289,26 +392,24 @@ def handle_geode():
                         mod["name"] = "HackMega"
                         mod["description"] = "Totally new software..."
                         data = json.dumps(mod, indent="\t").encode()
-                
+
                 zip_out.writestr(item, data)
-    
-    # Transfer it over to the geode folder now
+
+    # Force-transfer it over to the geode folder now (create folder, replace existing)
     GEODE_DIR = GD_PATH / "geode" / "mods"
-    if not GEODE_DIR.is_dir():
-        warn("Unable to find geode mods folder! Please make sure to install geode after this script finishes running.")
-        return
-    
     copied_geode = False
-    with progress_log("Copying geode to mods folder"):
-        shutil.copy(OUT_FILENAME, str(GEODE_DIR / OUT_FILENAME))
-        copied_geode = True
-    
+    with progress_log("Copying geode to mods folder (overwrite)"):
+        copied_geode = force_copy(out_path, GEODE_DIR / OUT_FILENAME)
+
+    if not copied_geode:
+        warn(f"Could not copy the .geode into '{GEODE_DIR!s}'. The file is kept at '{out_path!s}' — copy it manually after installing Geode.")
+
     geode_msg = (
-        "* The cracked geode was copied to the mods folder. You should be able to open the game and press tab to see the mod menu!"
+        f"* The cracked geode was written to {GEODE_DIR / OUT_FILENAME} (replaced if it existed). You should be able to open the game and press tab to see the mod menu!"
         if copied_geode else
-        "* Geode was not found during the cracking process. After installing geode, either rerun this script or copy the newly created .geode file manually."
+        f"* Geode was not copied. After installing geode, copy '{out_path!s}' into '{GEODE_DIR!s}' manually."
     )
-    
+
     BORDER = '#' * get_terminal_width()
     return dedent(f"""
         {BORDER}
@@ -318,8 +419,8 @@ def handle_geode():
         {geode_msg}
         {BORDER}
     """)
-    
-    
+
+
 
 # Write a now valid license to the expected directory
 with progress_log("Creating fake license file"):
@@ -357,19 +458,14 @@ with progress_log("Creating fake license file"):
     }
 
     license_str = json.dumps(license, separators=(",", ":"))
-    mh_license_path.write_text(license_str)
+
+    # primary copy in CWD, then force-replace into %LocalAppData%\absolllute.megahack
     mh_license_fallback_path.write_text(license_str)
+    if not force_copy(mh_license_fallback_path, mh_license_path):
+        warn(f"Could not write the license to '{mh_license_path!s}'. Copy '{mh_license_fallback_path!s}' there manually.")
 
     assert mh_license_path.exists() or mh_license_fallback_path.exists()
 
 # Yay all done, past this point is just printing stuff to make it nice and pretty
-
-def get_terminal_width():
-    try:
-        size = shutil.get_terminal_size()
-        return size.columns - 1
-    except OSError:
-        # Fallback if the terminal size cannot be determined
-        return 80
 
 print(handle_geode() if USE_GEODE else handle_standalone())
