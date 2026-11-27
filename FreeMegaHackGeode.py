@@ -32,7 +32,7 @@ err = lambda msg: print(f"[ERROR] {msg}") or exit(1)
 warn = lambda msg: print(f"[WARNING] {msg}")
 
 if platform.system().lower() != 'windows':
-    err(f"This crack is meant for windows versions of Mega Hack. {platform.system()} is not supported.")
+    warn(f"This crack is meant for windows versions of Mega Hack. {platform.system()} is not officially supported, continuing anyway.")
 
 # Get selected version from cli
 import argparse
@@ -48,11 +48,17 @@ USE_GEODE = not args.standalone # skip entries that have `geode: true`
 
 # Find Geometry Dash's installation directory
 from pathlib import Path
-import winreg
 import os
 import re
 
-def get_steam_path():
+try:
+    import winreg
+except ImportError:  # non-Windows
+    winreg = None
+
+def get_steam_path() -> Path | None:
+    if winreg is None:
+        return None
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam")
         return Path(winreg.QueryValueEx(key, "InstallPath")[0])
@@ -61,7 +67,7 @@ def get_steam_path():
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam")
             return Path(winreg.QueryValueEx(key, "InstallPath")[0])
         except FileNotFoundError:
-            err("Unable to find Steam installation directory in your registry")
+            return None
 
 def get_steam_libraries(steam_path: Path):
     libraries = [steam_path]
@@ -77,6 +83,8 @@ def get_steam_libraries(steam_path: Path):
 
 def find_game(app_id) -> Path | None:
     steam_path = get_steam_path()
+    if steam_path is None:
+        return None
     print(f"Got a steam installation path of '{steam_path}'")
 
     for library in get_steam_libraries(steam_path):
@@ -89,11 +97,57 @@ def find_game(app_id) -> Path | None:
 
     return None
 
+def pick_game_folder() -> Path | None:
+    """Open the native folder picker (works on every OS via tkinter)."""
+    chosen = None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            chosen = filedialog.askdirectory(
+                parent=root,
+                title="Select the Geometry Dash folder (the one containing GeometryDash.exe)",
+                initialdir=str(Path.home()),
+                mustexist=True,
+            )
+        finally:
+            root.destroy()
+    except Exception as e:
+        warn(f"Folder picker unavailable ({e}). Type the path instead.")
+        try:
+            chosen = input("Path to the Geometry Dash folder: ").strip().strip('"')
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    if not chosen:
+        return None
+    return Path(chosen)
+
+def ask_game_folder() -> Path:
+    while True:
+        chosen = pick_game_folder()
+        if chosen is None:
+            err("No game folder selected")
+        if (chosen / "GeometryDash.exe").is_file():
+            return chosen
+        warn(f"GeometryDash.exe not found in '{chosen}'. Pick the folder that holds the game files.")
+
 # Geometry Dash's steamid is 322170
 GD_PATH = find_game("322170")
 
 if GD_PATH is None:
-    err("Unable to find where Geometry Dash is installed")
+    warn("Geometry Dash was not found in any Steam library. Please select its folder manually.")
+    GD_PATH = ask_game_folder()
+elif not (GD_PATH / "GeometryDash.exe").exists():
+    warn(f"GeometryDash.exe not found in the detected path at '{GD_PATH}'. Please select the correct folder.")
+    GD_PATH = ask_game_folder()
 
 # Sanity check
 if not (GD_PATH / "GeometryDash.exe").exists():
@@ -109,15 +163,20 @@ import os
 FOLDERID_LocalAppData =  uuid.UUID("{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}").bytes_le
 appdata_dir_buf = ctypes.c_wchar_p()
 
-if ctypes.windll.shell32.SHGetKnownFolderPath(
-    ctypes.byref(ctypes.create_string_buffer(FOLDERID_LocalAppData, 16)),
-    0, 0,
-    ctypes.byref(appdata_dir_buf)
-):
-    warn("Failed to find the local appdata directory using SHGetKnownFolderPath. Trying %LOCALAPPDATA%.")
-    LOCALAPPDATA = os.getenv("LOCALAPPDATA", None)
+try:
+    appdata_result = ctypes.windll.shell32.SHGetKnownFolderPath(
+        ctypes.byref(ctypes.create_string_buffer(FOLDERID_LocalAppData, 16)),
+        0, 0,
+        ctypes.byref(appdata_dir_buf)
+    )
+except AttributeError:  # non-Windows
+    appdata_result = -1
+
+if appdata_result:
+    warn("Failed to find the local appdata directory using SHGetKnownFolderPath. Trying environment variables.")
+    LOCALAPPDATA = os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME")
     if not LOCALAPPDATA:
-        err("Unable to find the local AppData directory with SHGetKnownFolderPath or %LOCALAPPDATA%. Aborting.")
+        LOCALAPPDATA = str(Path.home() / ".local" / "share")
 else:
     LOCALAPPDATA = appdata_dir_buf.value
 
