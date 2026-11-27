@@ -94,6 +94,21 @@ if not (GD_PATH / "GeometryDash.exe").exists():
 
 print(f"Found Geometry Dash installation at '{GD_PATH}'")
 
+def is_geode_installed() -> bool:
+    if (GD_PATH / "geode").is_dir():
+        return True
+    if (GD_PATH / "geode-version").exists():
+        return True
+    try:
+        if any(GD_PATH.glob("*eode*.dll")):
+            return True
+    except OSError:
+        pass
+    return False
+
+if is_geode_installed():
+    err("Geode detected in the game folder. This crack installs the standalone version, remove Geode first. Aborting before download and install.")
+
 import ctypes
 import uuid
 import os
